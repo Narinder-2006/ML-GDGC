@@ -1,179 +1,180 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import joblib
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder, PowerTransformer
-from lightgbm import LGBMRegressor
+import numpy as np
+import os
 
-# Set page configuration
-st.set_page_config(page_title="Relationship Probability Predictor", layout="wide")
+# Page Config
+st.set_page_config(
+    page_title="Student Lifestyle Predictor",
+    page_icon="🎓",
+    layout="wide"
+)
 
-st.title("💘 Relationship Probability Predictor")
-st.markdown("""
-This app predicts the probability of a relationship based on student lifestyle data.
-It uses a **pre-trained model** loaded from a pickle file.
-""")
+# --- Helper Functions ---
 
-# --- 1. Data Loading (For UI Population Only) ---
-@st.cache_data
-def load_reference_data(file):
-    """
-    Loads the training data strictly to populate dropdown options
-    and determine min/max values for the input form.
-    """
-    df = pd.read_csv(file)
-    df.columns = df.columns.str.strip().str.lower()
-    
-    # Define useless columns to drop (same as training config)
-    useless_cols = [
-        'school_board', 'coffee_cups_daily', 'gym_frequency', 
-        'passion_drive', 'home_state'
-    ]
-    target_col = 'relationship_probability'
-    
-    # Identify ID column
-    possible_ids = [c for c in df.columns if 'id' in c]
-    id_col = possible_ids[0] if possible_ids else df.columns[0]
-    
-    # Columns to exclude
-    cols_to_exclude = [target_col, id_col] + useless_cols
-    
-    # Type casting for specific categorical columns
-    cols_to_str = ['food_orders', 'memes_shared', 'clubs_joined', 'num_sports']
-    for col in cols_to_str:
-        if col in df.columns:
-            df[col] = df[col].astype(str)
-
-    # Filter Feature DataFrame
-    X = df.drop(cols_to_exclude, axis=1, errors='ignore')
-    
-    # Identify Feature Types
-    num_cols = X.select_dtypes(include=['number']).columns.tolist()
-    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
-    
-    return X, num_cols, cat_cols
-
-# --- 2. Load Pre-trained Model ---
 @st.cache_resource
-def load_model(model_path):
-    try:
-        model = joblib.load(model_path)
-        return model
-    except Exception as e:
-        st.error(f"Failed to load model file: {e}")
+def load_model():
+    """Loads the trained pipeline model."""
+    if not os.path.exists("student_lifestyle_pipeline.pkl"):
+        st.error("Model file 'student_lifestyle_pipeline.pkl' not found.")
         return None
+    return joblib.load("student_lifestyle_pipeline.pkl")
 
-# --- 3. Sidebar Configuration ---
-st.sidebar.header("Configuration")
+@st.cache_data
+def load_feature_lookup():
+    """Loads the feature lookup CSV."""
+    if not os.path.exists("feature_lookup.csv"):
+        st.error("Feature lookup file 'feature_lookup.csv' not found.")
+        return None
+    # Ensure column names are stripped of whitespace
+    df = pd.read_csv("feature_lookup.csv")
+    df.columns = df.columns.str.strip()
+    return df
 
-# Load Model
-model_path = "student_lifestyle_pipeline.pkl"
-uploaded_model = st.sidebar.file_uploader("Upload Model (.pkl)", type=["pkl"])
-if uploaded_model:
-    pipeline = load_model(uploaded_model)
-    st.sidebar.success("Custom model loaded!")
-else:
+def extract_categories_from_pipeline(pipeline, feature_names):
+    """
+    Attempts to extract learned categories from the OneHotEncoder in the pipeline.
+    This allows us to show SelectBoxes instead of TextInputs for categorical data.
+    """
+    cat_options = {}
     try:
-        pipeline = load_model(model_path)
-        st.sidebar.success(f"Loaded local model: {model_path}")
-    except FileNotFoundError:
-        st.sidebar.error("Model file not found.")
-        pipeline = None
+        # Access the preprocessor step
+        preprocessor = pipeline.named_steps['preprocessor']
+        
+        # Find the categorical transformer. 
+        # Usually stored as ('cat', pipeline, columns) in ColumnTransformer
+        # We search for the transformer named 'cat'
+        for name, transformer, cols in preprocessor.transformers_:
+            if name == 'cat':
+                # Inside the 'cat' pipeline, find the 'encoder' step
+                encoder = transformer.named_steps['encoder']
+                
+                # Get the categories learned by OneHotEncoder
+                # encoder.categories_ is a list of arrays, one for each column in 'cols'
+                if hasattr(encoder, 'categories_'):
+                    for col_name, categories in zip(cols, encoder.categories_):
+                        # Clean up column name (model might expect 'f4', lookup has 'F4')
+                        clean_col = col_name.lower() 
+                        cat_options[clean_col] = list(categories)
+    except Exception as e:
+        # Fallback: If extraction fails (structure differs), we just return empty
+        # and the UI will default to text inputs.
+        pass
+        
+    return cat_options
 
-# Load Reference Data
-uploaded_data = st.sidebar.file_uploader("Upload Reference Data (train.csv)", type=["csv"])
-default_data_path = "train.csv"
+# --- Main App Layout ---
 
-X_reference = None
-num_features = []
-cat_features = []
+def main():
+    st.title("🎓 Student Lifestyle Predictor")
+    st.markdown("""
+    This application predicts a student's lifestyle score based on various academic 
+    and personal habits. Enter the details below to get a prediction.
+    """)
 
-if uploaded_data:
-    X_reference, num_features, cat_features = load_reference_data(uploaded_data)
-else:
-    try:
-        X_reference, num_features, cat_features = load_reference_data(default_data_path)
-    except FileNotFoundError:
-        st.sidebar.warning("Reference data (train.csv) not found. Upload it to populate form options.")
+    # Load Data
+    pipeline = load_model()
+    lookup_df = load_feature_lookup()
 
-# --- 4. Input Form & Prediction ---
+    if pipeline is None or lookup_df is None:
+        st.stop()
 
-if pipeline is not None and X_reference is not None:
-    st.header("Enter Student Details")
-    
+    # Extract known categories from the model to make the UI friendlier
+    # We need to map feature codes (f4, f5) to these categories
+    known_categories = extract_categories_from_pipeline(pipeline, lookup_df['feature_code'])
+
+    # Form Container
     with st.form("prediction_form"):
+        st.subheader("Student Details")
+        
         input_data = {}
         
-        # Categorical Inputs
-        st.subheader("Categorical Attributes")
-        c_cols = st.columns(3)
-        for i, col_name in enumerate(cat_features):
-            with c_cols[i % 3]:
-                options = sorted(X_reference[col_name].unique().tolist())
-                input_data[col_name] = st.selectbox(f"{col_name.replace('_', ' ').title()}", options)
+        # Create a grid layout for inputs
+        cols = st.columns(3)
         
-        st.write("---")
-        
-        # Numerical Inputs
-        st.subheader("Numerical Attributes")
-        n_cols = st.columns(3)
-        for i, col_name in enumerate(num_features):
-            with n_cols[i % 3]:
-                min_val = float(X_reference[col_name].min())
-                max_val = float(X_reference[col_name].max())
-                mean_val = float(X_reference[col_name].mean())
+        # Iterate through the lookup CSV to generate inputs dynamically
+        for index, row in lookup_df.iterrows():
+            col_idx = index % 3
+            
+            feature_code_raw = row['feature_code'] # e.g., "F1"
+            feature_name = row['relevance']        # e.g., "age"
+            feature_type = row['type']             # e.g., "numeric"
+            
+            # The model expects lowercase keys (f1, f2...), derived from checking pipeline internals
+            model_key = feature_code_raw.lower()
+            
+            with cols[col_idx]:
+                label = f"{feature_name.title()} ({feature_code_raw})"
                 
-                input_data[col_name] = st.number_input(
-                    f"{col_name.replace('_', ' ').title()}", 
-                    min_value=0.0,
-                    max_value=max_val * 2.0, # Allow some buffer
-                    value=mean_val
-                )
-                
-        submit = st.form_submit_button("Predict Probability")
+                if feature_type.strip() == 'numeric':
+                    # Numeric Input
+                    input_data[model_key] = st.number_input(
+                        label, 
+                        value=0.0, 
+                        step=0.1,
+                        key=model_key
+                    )
+                else:
+                    # Categorical Input
+                    # Check if we successfully extracted options from the model
+                    options = known_categories.get(model_key)
+                    
+                    if options:
+                        input_data[model_key] = st.selectbox(
+                            label, 
+                            options=options,
+                            key=model_key
+                        )
+                    else:
+                        # Fallback to text input if options aren't found
+                        input_data[model_key] = st.text_input(
+                            label,
+                            placeholder="e.g., Yes, No, Male...",
+                            key=model_key
+                        )
 
-    # --- 5. Prediction Logic ---
-    if submit:
-        # Convert input dict to DataFrame
-        input_df = pd.DataFrame([input_data])
-        
-        # Ensure consistency in types for the specific categorical columns
-        cols_to_str = ['food_orders', 'memes_shared', 'clubs_joined', 'num_sports']
-        for col in cols_to_str:
-            if col in input_df.columns:
-                input_df[col] = input_df[col].astype(str)
+        # Submit Button
+        submit_btn = st.form_submit_button("Predict Lifestyle Score", type="primary")
 
+    # --- Prediction Logic ---
+    if submit_btn:
         try:
+            # Create DataFrame from inputs
+            input_df = pd.DataFrame([input_data])
+            
+            # Ensure columns are ordered correctly if the pipeline is strict
+            # (Though ColumnTransformer usually handles by name)
+            
             with st.spinner("Calculating..."):
-                prediction = pipeline.predict(input_df)[0]
-                prediction = np.clip(prediction, 0, 100)
-            
+                prediction = pipeline.predict(input_df)
+                
+                # Clip prediction as per the notebook logic
+                final_score = np.clip(prediction[0], 0, 100)
+
+            # Display Result
             st.markdown("---")
-            st.subheader("Result")
+            st.subheader("Prediction Result")
             
-            metric_col1, metric_col2 = st.columns([1, 3])
+            metric_col1, metric_col2 = st.columns([1, 2])
             
             with metric_col1:
-                st.metric(label="Relationship Probability", value=f"{prediction:.2f}%")
+                st.metric(
+                    label="Predicted Score", 
+                    value=f"{final_score:.2f} / 100"
+                )
             
             with metric_col2:
-                st.progress(int(prediction))
-                if prediction < 30:
-                    st.info("Low Probability")
-                elif prediction < 70:
-                    st.warning("Moderate Probability")
+                if final_score > 75:
+                    st.success("🌟 Excellent! This student has a high predicted lifestyle score.")
+                elif final_score > 50:
+                    st.info("👍 Good. The lifestyle score is balanced.")
                 else:
-                    st.success("High Probability")
+                    st.warning("⚠️ Attention Needed. The predicted score is on the lower side.")
                     
         except Exception as e:
-            st.error(f"Prediction Error: {e}")
-            st.write("Debug Info - Input Data Types:")
-            st.write(input_df.dtypes)
+            st.error(f"An error occurred during prediction: {str(e)}")
+            st.info("Tip: Ensure categorical inputs match the values expected by the model (e.g., 'Male' vs 'M').")
 
-elif pipeline is None:
-    st.warning("Please upload or place 'student_lifestyle_pipeline.pkl' in the directory.")
-elif X_reference is None:
-    st.warning("Please upload 'train.csv' so the app knows what options to show in the form.")
+if __name__ == "__main__":
+    main()
