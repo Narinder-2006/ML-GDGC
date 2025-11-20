@@ -6,7 +6,7 @@ import os
 
 # Page Config
 st.set_page_config(
-    page_title="Student Relation Status Predictor",
+    page_title="Student Relationship Status Predictor",
     page_icon="🎓",
     layout="wide"
 )
@@ -178,4 +178,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
